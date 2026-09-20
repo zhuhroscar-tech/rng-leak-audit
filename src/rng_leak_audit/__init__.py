@@ -2,7 +2,7 @@
 global-RNG-state leak (pytorch/pytorch#11062, #122697, #107443)."""
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = ["isolated_iter", "diagnose", "__version__"]
 

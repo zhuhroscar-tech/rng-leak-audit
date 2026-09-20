@@ -117,6 +117,122 @@ def test_unguarded_iter_diverges_from_baseline_bug_injection_check():
     )
 
 
+def test_isolated_iter_with_block_restores_state_for_manual_next_pattern():
+    """Regression test for a real bug found by this run's stewardship
+    backstop audit: the ORIGINAL isolated_iter() implementation was a
+    bare generator whose restore-on-exit logic lived in a `finally`
+    block inside the generator's own frame. That `finally` only ran when
+    the generator was actually closed, exhausted, or garbage collected --
+    NOT synchronously when the caller's code around a manual `next()`
+    call raises and the generator object is held in a named local
+    variable (a real pattern in prefetch/double-buffering training loops
+    that call `next()` directly instead of using a bare `for` loop).
+    Before the fix, there was no way to get a synchronous restoration
+    guarantee for this exact pattern at all -- this test fails against
+    the pre-fix implementation (`TypeError: 'generator' object does not
+    support the context manager protocol`) and passes with the fix's
+    `with isolated_iter(loader) as batches:` form, which now gives
+    manual-`next()` callers the same deterministic guarantee as the
+    `for` idiom already had.
+    """
+    from torch.utils.data import DataLoader
+
+    seed = 42
+    baseline = _draw_without_loader(torch, seed)
+
+    torch.manual_seed(seed)
+    dataset = _make_dataset(torch)
+    loader = DataLoader(dataset, batch_size=4, shuffle=True, num_workers=0)
+
+    try:
+        with isolated_iter(loader) as batches:
+            while True:
+                _batch = next(batches)
+                raise RuntimeError("boom mid-manual-iteration")
+    except RuntimeError:
+        pass
+    except StopIteration:
+        pass
+
+    # __exit__ has already run synchronously by this point -- the state
+    # must be restored regardless of any lingering reference to `batches`.
+    draw_after_with_block = torch.rand(4)
+    assert torch.equal(baseline, draw_after_with_block), (
+        "isolated_iter() used as a context manager must restore RNG "
+        "state deterministically via __exit__ for the manual-next() "
+        "iteration pattern, not just the bare `for` idiom"
+    )
+
+
+def test_isolated_iter_as_context_manager_restores_on_exception_in_with_block():
+    """The `with isolated_iter(loader) as batches:` form must restore
+    state deterministically via __exit__ even when the caller's own code
+    inside the `with` block raises for a reason unrelated to iteration
+    itself (e.g. a training-step exception after a batch was already
+    yielded) -- this is the documented, guaranteed-restoration idiom."""
+    from torch.utils.data import DataLoader
+
+    seed = 71
+    baseline = _draw_without_loader(torch, seed)
+
+    torch.manual_seed(seed)
+    dataset = _make_dataset(torch)
+    loader = DataLoader(dataset, batch_size=4, shuffle=True, num_workers=0)
+
+    with pytest.raises(RuntimeError, match="boom in training step"):
+        with isolated_iter(loader) as batches:
+            for _batch in batches:
+                raise RuntimeError("boom in training step")
+
+    guarded_draw = torch.rand(4)
+    assert torch.equal(baseline, guarded_draw)
+
+
+def test_isolated_iter_restores_when_iter_construction_itself_raises():
+    """If iter(dataloader) itself raises AFTER already drawing from the
+    global RNG (the exact class of mutation this tool guards against),
+    state must still be restored before the exception propagates --
+    the original code's snapshot-then-call-iter() sequence had no
+    protection for a raising iter() call at all."""
+
+    class _ExplodingIterable:
+        """A minimal iterable whose __iter__ mutates the global RNG (as
+        real DataLoader.__init__/_base_seed construction does) and then
+        raises, simulating any real-world failure during iterator setup
+        (e.g. a worker-process spawn failure)."""
+
+        def __iter__(self):
+            torch.rand(1)  # simulate the real leak: a mutating draw...
+            raise RuntimeError("boom during iterator construction")
+
+    seed = 13
+    baseline = _draw_without_loader(torch, seed)
+
+    torch.manual_seed(seed)
+    with pytest.raises(RuntimeError, match="boom during iterator construction"):
+        isolated_iter(_ExplodingIterable())
+
+    draw_after = torch.rand(4)
+    assert torch.equal(baseline, draw_after), (
+        "isolated_iter() must restore RNG state even when the wrapped "
+        "iterable's own __iter__ raises after mutating global RNG state"
+    )
+
+
+def test_isolated_iter_close_is_idempotent():
+    """Calling close() more than once, or letting __del__ run after an
+    explicit close(), must not double-restore or raise."""
+    from torch.utils.data import DataLoader
+
+    dataset = _make_dataset(torch)
+    loader = DataLoader(dataset, batch_size=4, shuffle=False, num_workers=0)
+    guard = isolated_iter(loader)
+    for _batch in guard:
+        pass
+    guard.close()
+    guard.close()  # must not raise or double-apply state
+
+
 def test_isolated_iter_preserves_cuda_rng_state_when_available():
     """Skip cleanly (not xfail-silently) when no CUDA device is present --
     this host (macOS, no CUDA) cannot exercise this path; documented as a

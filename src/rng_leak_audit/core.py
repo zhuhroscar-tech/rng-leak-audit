@@ -107,31 +107,126 @@ class LeakDiagnosis:
     max_abs_diff_guarded: float
 
 
+class _IsolatedIterator:
+    """Iterator AND context manager returned by :func:`isolated_iter`.
+
+    Restoration is guaranteed *synchronously* when this object is used as
+    a context manager -- ``with isolated_iter(loader) as batches: ...``
+    -- because ``__exit__`` runs deterministically on any exit from the
+    ``with`` block (normal completion, ``break``, ``return``, or any
+    exception propagating through it), per the ``with``-statement
+    specification. This does NOT depend on reference counting or
+    garbage-collection timing, unlike a bare generator.
+
+    Without ``with``, this object still restores state once it is closed
+    or garbage collected -- reliable for the common
+    ``for batch in isolated_iter(loader): ...`` pattern under CPython
+    (the for-loop's own hidden iterator reference is dropped, and thus
+    finalized via refcounting, as soon as the loop is exited by any
+    means), but NOT reliable if the object is instead stored in a named
+    variable and driven with manual ``next()`` calls whose caller-side
+    exception handling outlives the loop body (a real pattern in
+    prefetch/double-buffering training loops) -- use the ``with`` form
+    whenever the restoration guarantee matters, not just the bare
+    iterator form.
+
+    Two additional gaps closed versus the original generator-only
+    implementation (found by this fleet's backstop audit, independently
+    reproduced before fixing):
+
+    1. If ``iter(dataloader)`` itself raises AFTER already drawing from
+       the global RNG (the exact mutation this tool exists to guard
+       against), state is now restored before the exception propagates,
+       instead of being silently left dirty (the original code only
+       snapshotted, then let a raising ``iter()`` call skip restoration
+       entirely).
+    2. If the underlying iterator's own ``__next__`` raises mid-consumption
+       (e.g. a worker crash), state is restored immediately rather than
+       only when this object is eventually closed/collected.
+    """
+
+    def __init__(self, dataloader, torch_module):
+        self._torch = torch_module
+        self._restored = False
+        self._cpu_state = torch_module.get_rng_state()
+        self._cuda_states = (
+            torch_module.cuda.get_rng_state_all()
+            if torch_module.cuda.is_available()
+            else None
+        )
+        try:
+            self._iterator = iter(dataloader)
+        except BaseException:
+            self._restore()
+            raise
+
+    def _restore(self):
+        if self._restored:
+            return
+        self._restored = True
+        self._torch.set_rng_state(self._cpu_state)
+        if self._cuda_states is not None:
+            self._torch.cuda.set_rng_state_all(self._cuda_states)
+
+    def close(self):
+        """Explicitly restore now; safe to call more than once."""
+        self._restore()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        try:
+            return next(self._iterator)
+        except BaseException:
+            # Covers both normal StopIteration (exhaustion) and any
+            # other exception raised by the wrapped loader's own
+            # __next__ (e.g. a worker crash) -- either way this
+            # iterator's useful life is over, so restore now rather
+            # than waiting for close()/__del__.
+            self._restore()
+            raise
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._restore()
+        return False
+
+    def __del__(self):
+        # Best-effort fallback for the bare for-loop pattern and for
+        # callers who neither exhaust the iterator nor use `with`; not a
+        # substitute for `with` when the restoration guarantee matters
+        # (see class docstring).
+        self._restore()
+
+
 def isolated_iter(dataloader):
     """Iterate ``dataloader`` end to end without perturbing the caller's
     global torch RNG state, as observed immediately BEFORE this call and
-    immediately AFTER the loop finishes (including early termination via
-    ``break``, ``return``, or an exception).
+    immediately AFTER consumption ends.
 
     Root-cause note: the leak is not confined to constructing the
     iterator (``iter(dataloader)``) -- ``next()`` calls on a
     ``shuffle=True`` loader also draw from the global RNG lazily (to
     build the shuffled index permutation), and this was independently
-    reproduced on this host before writing this guard (see
-    ``debug4.py``-style probes in the test suite / README). A guard that
-    only brackets ``iter()`` construction is therefore NOT sufficient --
-    it must bracket the entire consumption of the loader. This function
-    snapshots ``torch.get_rng_state()`` (and every visible CUDA device's
-    RNG state) once, yields every batch exactly as a normal iterator
-    would, and restores the snapshot exactly once when the generator is
-    exhausted, closed, or throws -- via ``try/finally`` -- so partial
-    iteration (a caller that does ``break`` before the last batch) is
-    still safe.
+    reproduced on this host before writing this guard (see the test
+    suite / README). A guard that only brackets ``iter()`` construction
+    is therefore NOT sufficient -- it must bracket the entire consumption
+    of the loader.
+
+    Returns an :class:`_IsolatedIterator`, which is both a plain iterator
+    (for the ``for batch in isolated_iter(loader): ...`` idiom) and a
+    context manager giving a deterministic restoration guarantee (for the
+    ``with isolated_iter(loader) as batches: ...`` idiom) -- see that
+    class's docstring for exactly which usage pattern gets which
+    guarantee.
 
     Any randomness a caller's own model/transform code deliberately draws
     from the global RNG *while consuming a yielded batch* (e.g. inside
     the training step's own forward pass) happens between two calls to
-    this generator and is therefore NOT rolled back -- only the
+    this iterator and is therefore NOT rolled back -- only the
     DataLoader's own internal bookkeeping draws are neutralized. Use this
     to wrap a validation/eval loop so it cannot perturb the training
     run's subsequent random draws, not to make a training loop's own
@@ -139,22 +234,7 @@ def isolated_iter(dataloader):
     job).
     """
     torch_module, _dataloader_cls, _dataset_cls = _import_torch()
-
-    cpu_state = torch_module.get_rng_state()
-    cuda_states = None
-    if torch_module.cuda.is_available():
-        cuda_states = torch_module.cuda.get_rng_state_all()
-
-    def _generator():
-        try:
-            for batch in dataloader:
-                yield batch
-        finally:
-            torch_module.set_rng_state(cpu_state)
-            if cuda_states is not None:
-                torch_module.cuda.set_rng_state_all(cuda_states)
-
-    return _generator()
+    return _IsolatedIterator(dataloader, torch_module)
 
 
 def _run_probe(torch_module, dataloader_cls, cfg: ProbeConfig, seed: int, guarded: bool):

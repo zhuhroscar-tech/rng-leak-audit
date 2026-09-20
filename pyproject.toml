@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rng-leak-audit"
-version = "0.1.0"
+version = "0.2.0"
 description = "Detect and neutralize PyTorch's DataLoader-iterator global-RNG-state leak (pytorch/pytorch#11062, #122697, #107443)"
 readme = "README.md"
 license = { text = "MIT" }

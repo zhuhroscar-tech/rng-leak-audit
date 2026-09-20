@@ -11,7 +11,7 @@ import rng_leak_audit
 
 
 def test_version_attribute_available_without_torch_import_path():
-    assert rng_leak_audit.__version__ == "0.1.0"
+    assert rng_leak_audit.__version__ == "0.2.0"
 
 
 def test_getattr_lazily_resolves_isolated_iter_from_core():
