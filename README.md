@@ -4,6 +4,8 @@
 
 Detect whether constructing a PyTorch `DataLoader` iterator silently consumes global RNG state, and use a wrapper that neutralizes it. This targets the behavior described in [pytorch/pytorch#11062](https://github.com/pytorch/pytorch/issues/11062) (open since 2018), [#122697](https://github.com/pytorch/pytorch/issues/122697), and [#107443](https://github.com/pytorch/pytorch/issues/107443) — not every possible source of training non-reproducibility.
 
+![rng-leak-audit example output](docs/images/example-output.png)
+
 The bug: merely calling `iter(dataloader)` — even with `shuffle=False`, `num_workers=0`, and a dataset with no randomness anywhere in it — draws from the global torch RNG to build an internal `_base_seed`. Any code that runs afterward and expects reproducible `torch.rand()`/`torch.randn()` output silently gets a different sequence than it would have without the DataLoader ever being touched. This is most dangerous when an unrelated validation/eval `DataLoader` is iterated between training steps: running validation perturbs the *training* run's subsequent random draws, so two training runs that only differ in "did validation run this epoch" can silently diverge, with no error, warning, or visible symptom. The CLI reproduces this from scratch on your installed PyTorch build rather than assuming a particular version is affected.
 
 ## Install and diagnose
