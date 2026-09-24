@@ -11,7 +11,11 @@ import rng_leak_audit
 
 
 def test_version_attribute_available_without_torch_import_path():
-    assert rng_leak_audit.__version__ == "0.2.0"
+    # The exact value is checked against pyproject.toml in
+    # test_version_consistency.py; this test only verifies that the top-level
+    # version attribute is available without importing the torch-dependent core.
+    assert isinstance(rng_leak_audit.__version__, str)
+    assert rng_leak_audit.__version__
 
 
 def test_getattr_lazily_resolves_isolated_iter_from_core():
