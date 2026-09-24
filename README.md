@@ -51,4 +51,8 @@ python -m pip install -e '.[dev,torch]'
 python -m pytest -v
 ```
 
+## Release history
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 [MIT license](LICENSE).

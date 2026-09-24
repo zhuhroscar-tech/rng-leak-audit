@@ -4,6 +4,8 @@ __pycache__/
 .coverage
 *.egg-info/
 dist/
+dist_*/
 build/
 .venv/
 venv/
+.smoke-*/
