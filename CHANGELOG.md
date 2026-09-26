@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.4 — 2026-09-26
+
+- Added package resource links for the project homepage, issue tracker, and changelog.
+- Made release-tag CI coverage explicit for `v*` tags.
+- Added repository-contract coverage so package metadata and release-tag CI wiring stay intact.
+
 ## v0.2.3 — 2026-09-24
 
 - Added a Chinese README that the language switcher already advertised.

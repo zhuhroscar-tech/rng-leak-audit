@@ -72,3 +72,22 @@ def test_manifest_includes_release_metadata_and_tests():
         "recursive-include .github/workflows *.yml",
     ):
         assert required in manifest
+
+
+def test_package_metadata_exposes_project_resource_links():
+    pyproject = PYPROJECT.read_text()
+
+    assert "[project.urls]" in pyproject
+    assert 'Homepage = "https://github.com/zhuhroscar-tech/rng-leak-audit"' in pyproject
+    assert 'Issues = "https://github.com/zhuhroscar-tech/rng-leak-audit/issues"' in pyproject
+    assert (
+        'Changelog = "https://github.com/zhuhroscar-tech/rng-leak-audit/blob/main/CHANGELOG.md"'
+        in pyproject
+    )
+
+
+def test_ci_runs_on_release_tags():
+    ci = CI.read_text()
+
+    assert "tags:" in ci
+    assert '"v*"' in ci
